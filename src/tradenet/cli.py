@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
@@ -115,6 +116,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--search",
         help="Filter countries by name, ISO code, or Comtrade numeric code.",
     )
+    countries.add_argument(
+        "--csv",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help=(
+            "Write the full country list to CSV (not truncated to 100). "
+            "Default path: DATA_DIR/countries.csv."
+        ),
+    )
 
     return parser
 
@@ -165,6 +176,13 @@ def cmd_countries(args: argparse.Namespace) -> int:
         console.print("[yellow]No countries matched your search.[/yellow]")
         return 0
 
+    if args.csv is not None:
+        settings = get_settings()
+        output_path = Path(args.csv) if args.csv else settings.data_dir / "countries.csv"
+        write_countries_csv(output_path, rows)
+        console.print(f"[green]Wrote {len(rows)} countries to {output_path}[/green]")
+        return 0
+
     table = Table(title="UN Comtrade reporters")
     table.add_column("Code")
     table.add_column("ISO")
@@ -176,7 +194,25 @@ def cmd_countries(args: argparse.Namespace) -> int:
     console.print(table)
     if len(rows) > 100:
         console.print(f"[dim]Showing 100 of {len(rows)} matches.[/dim]")
+        console.print("[dim]Use --csv to write the full list.[/dim]")
     return 0
+
+
+def write_countries_csv(path: Path, rows: list[dict[str, str]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["code", "iso3", "iso2", "name"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("id", ""),
+                    row.get("isoCode", ""),
+                    row.get("isoCode2", ""),
+                    row.get("text", ""),
+                ]
+            )
+    return path
 
 
 def main(argv: list[str] | None = None) -> None:
