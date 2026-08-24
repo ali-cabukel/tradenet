@@ -47,6 +47,7 @@ poetry run tradenet collect \
   --flow export
 
 poetry run tradenet export-neo4j
+poetry run tradenet export-neo4j --aggregate
 ```
 
 
@@ -74,52 +75,112 @@ poetry run tradenet export-neo4j
 
 `export-neo4j` writes CSV files. It does **not** load them into a running Neo4j instance. Restarting Neo4j will not make the data appear in Browser.
 
-After collection it writes three files under `data/neo4j/`:
+Default output is `data/neo4j/`:
 
 - `nodes_countries.csv` — `(:Country {iso3, name})`
 - `nodes_categories.csv` — `(:Category {id, name})`
-- `rels_trades_with.csv` — `(Country)-[:TRADES_WITH]->(Country)` with value, weight, year, flow, and supply category
+- `rels_trades_with.csv` — `(Country)-[:TRADES_WITH]->(Country)`
 
-The CSVs use `neo4j-admin` bulk-import headers. For a running Docker container, copy them into Neo4j’s import directory, then `LOAD CSV` in Browser.
+Use `--aggregate` to collapse commodity-level rows into one edge per **from country, to country, category, and year**, with `sum(tradeValueUsd)`:
 
 ```bash
-docker cp data/neo4j/. <container>:/var/lib/neo4j/import/
+poetry run tradenet export-neo4j --aggregate
 ```
 
-If the container mounts `data/neo4j-data` as `/data`, that is database storage, not the CSV folder. Copy (or bind-mount) `data/neo4j` to `/var/lib/neo4j/import`.
+That file has columns `fromIso`, `toIso`, `year`, `supplyCategory`, `tradeValueUsd`, `netWeightKg`, `flowCount`. Year is kept so 2022 and 2025 stay separate. Omit `--aggregate` to keep one relationship per HS chapter.
+
+Edges point from exporter to importer. Put CSVs in `data/neo4j/` (import files). `data/neo4j-data/` is Neo4j database storage (`/data`), not the CSV folder.
+
+### Docker
+
+From the project root:
+
+```bash
+mkdir -p data/neo4j data/neo4j-data
+
+docker run -d --name tradenet-neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -v "$PWD/data/neo4j-data:/data" \
+  -v "$PWD/data/neo4j:/var/lib/neo4j/import" \
+  -e NEO4J_server_memory_heap_initial__size=2G \
+  -e NEO4J_server_memory_heap_max__size=4G \
+  -e NEO4J_db_memory_transaction_total_max=3G \
+  neo4j:latest
+```
+
+Open [http://localhost:7474](http://localhost:7474). `max__size` uses a double underscore because the setting is `max_size`. `total_max` uses a single underscore because the setting is `total.max`.
+
+If the container is already running without the import mount, copy the CSVs in:
+
+```bash
+docker cp data/neo4j/. tradenet-neo4j:/var/lib/neo4j/import/
+```
+
+To replace an existing container:
+
+```bash
+docker stop tradenet-neo4j
+docker rm tradenet-neo4j
+```
+
+Then re-run the `docker run` command above.
+
+### Load CSV
+
+Clear the graph if you are re-importing:
+
+```cypher
+MATCH (n)
+DETACH DELETE n;
+```
+
+Then in Browser (one statement at a time). Batch relationship import so large files do not hit `db.memory.transaction.total.max`:
 
 ```cypher
 LOAD CSV WITH HEADERS FROM 'file:///nodes_countries.csv' AS row
 MERGE (c:Country {iso3: row.iso3})
 SET c.name = row.name;
+```
 
+```cypher
 LOAD CSV WITH HEADERS FROM 'file:///nodes_categories.csv' AS row
 MERGE (cat:Category {id: row.id})
 SET cat.name = row.name;
-
-LOAD CSV FROM 'file:///rels_trades_with.csv' AS row
-WITH row WHERE row[0] <> ':START_ID(Country)'
-MATCH (a:Country {iso3: row[0]})
-MATCH (b:Country {iso3: row[1]})
-CREATE (a)-[r:TRADES_WITH {
-  flowId: row[3],
-  year: toInteger(row[4]),
-  flow: row[5],
-  supplyCategory: row[6],
-  commodityCode: row[7],
-  commodityDescription: row[8],
-  tradeValueUsd: toFloat(row[9]),
-  netWeightKg: toFloat(row[10])
-}]->(b);
 ```
 
-Example query after import:
+```cypher
+LOAD CSV WITH HEADERS FROM 'file:///rels_trades_with.csv' AS row
+CALL {
+  WITH row
+  MATCH (a:Country {iso3: row.fromIso})
+  MATCH (b:Country {iso3: row.toIso})
+  CREATE (a)-[r:TRADES_WITH {
+    year: toInteger(row.year),
+    supplyCategory: row.supplyCategory,
+    tradeValueUsd: toFloat(row.tradeValueUsd),
+    netWeightKg: toFloat(row.netWeightKg),
+    flowCount: toInteger(row.flowCount)
+  }]->(b)
+} IN TRANSACTIONS OF 1000 ROWS;
+```
+
+The `LOAD CSV` above matches `--aggregate` output. Without `--aggregate`, relationship columns are the older per-commodity `neo4j-admin` headers.
+
+### Example queries
 
 ```cypher
 MATCH (a:Country {iso3: "DEU"})-[r:TRADES_WITH {supplyCategory: "energy"}]->(b:Country)
 RETURN a.name, b.name, r.tradeValueUsd, r.year
 ORDER BY r.tradeValueUsd DESC
 LIMIT 20;
+```
+
+Food exported from the USA to Türkiye (Türkiye’s food imports from the USA):
+
+```cypher
+MATCH (usa:Country {iso3: "USA"})-[r:TRADES_WITH {supplyCategory: "food"}]->(tur:Country {iso3: "TUR"})
+RETURN usa.name, tur.name, r.year, r.tradeValueUsd, r.flowCount
+ORDER BY r.tradeValueUsd DESC;
 ```
 
 

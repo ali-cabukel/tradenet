@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 from rich.console import Console
 
@@ -13,10 +15,21 @@ from tradenet.models import TradeFlow
 console = Console()
 
 
+class AggregatedTrade(NamedTuple):
+    start_iso: str
+    end_iso: str
+    year: int
+    supply_category: str
+    trade_value_usd: float
+    net_weight_kg: float
+    flow_count: int
+
+
 def export_neo4j(
     *,
     input_path: Path,
     output_dir: Path,
+    aggregate: bool = False,
 ) -> Path:
     """Write country nodes and TRADES_WITH relationships as CSV files."""
 
@@ -34,7 +47,15 @@ def export_neo4j(
 
     _write_countries(countries_path, countries)
     _write_categories(categories_path, categories)
-    _write_relationships(flows_path, flows)
+    if aggregate:
+        aggregated = aggregate_relationships(flows)
+        _write_aggregated_relationships(flows_path, aggregated)
+        console.print(
+            f"[green]Aggregated {len(flows)} flows into {len(aggregated)} relationships "
+            "(from, to, category, year).[/green]"
+        )
+    else:
+        _write_relationships(flows_path, flows)
 
     console.print(
         "[green]Neo4j import files written:[/green]\n"
@@ -71,6 +92,62 @@ def _write_categories(path: Path, categories: dict[str, str]) -> None:
         writer.writerow(["categoryId:ID(Category)", "id", "name"])
         for category_id, name in sorted(categories.items()):
             writer.writerow([category_id, category_id, name])
+
+
+def aggregate_relationships(flows: list[TradeFlow]) -> list[AggregatedTrade]:
+    """Collapse commodity-level flows into from/to/category/year sums."""
+
+    totals: dict[tuple[str, str, int, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    for flow in flows:
+        start_id, end_id = _relationship_endpoints(flow)
+        key = (start_id, end_id, flow.year, flow.supply_category)
+        bucket = totals[key]
+        bucket[0] += flow.trade_value_usd or 0.0
+        bucket[1] += flow.net_weight_kg or 0.0
+        bucket[2] += 1
+
+    return [
+        AggregatedTrade(
+            start_iso=start_iso,
+            end_iso=end_iso,
+            year=year,
+            supply_category=category,
+            trade_value_usd=value,
+            net_weight_kg=weight,
+            flow_count=int(count),
+        )
+        for (start_iso, end_iso, year, category), (value, weight, count) in sorted(
+            totals.items()
+        )
+    ]
+
+
+def _write_aggregated_relationships(path: Path, rows: list[AggregatedTrade]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "fromIso",
+                "toIso",
+                "year",
+                "supplyCategory",
+                "tradeValueUsd",
+                "netWeightKg",
+                "flowCount",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.start_iso,
+                    row.end_iso,
+                    row.year,
+                    row.supply_category,
+                    row.trade_value_usd,
+                    row.net_weight_kg,
+                    row.flow_count,
+                ]
+            )
 
 
 def _write_relationships(path: Path, flows: list[TradeFlow]) -> None:

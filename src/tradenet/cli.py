@@ -102,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Directory for Neo4j CSV output (default: DATA_DIR/neo4j).",
     )
+    export.add_argument(
+        "--aggregate",
+        action="store_true",
+        help=(
+            "Collapse relationships to from country, to country, category, and year "
+            "with summed trade value. Recommended for Neo4j."
+        ),
+    )
 
     categories = subparsers.add_parser(
         "categories",
@@ -149,7 +157,7 @@ def cmd_export_neo4j(args: argparse.Namespace) -> int:
     settings = get_settings()
     input_path = args.input or settings.data_dir / "trade" / "flows.jsonl"
     output_dir = args.output_dir or settings.data_dir / "neo4j"
-    export_neo4j(input_path=input_path, output_dir=output_dir)
+    export_neo4j(input_path=input_path, output_dir=output_dir, aggregate=args.aggregate)
     return 0
 
 
